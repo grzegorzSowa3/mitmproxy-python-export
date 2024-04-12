@@ -64,9 +64,9 @@ def curl_command(f: flow.Flow) -> str:
     server_addr = f.server_conn.peername[0] if f.server_conn.peername else None
 
     if (
-        ctx.options.export_preserve_original_ip
-        and server_addr
-        and request.pretty_host != server_addr
+            ctx.options.export_preserve_original_ip
+            and server_addr
+            and request.pretty_host != server_addr
     ):
         resolve = f"{request.pretty_host}:{request.port}:[{server_addr}]"
         args.append("--resolve")
@@ -123,12 +123,12 @@ def raw_response(f: flow.Flow) -> bytes:
 def raw(f: flow.Flow, separator=b"\r\n\r\n") -> bytes:
     """Return either the request or response if only one exists, otherwise return both"""
     request_present = (
-        isinstance(f, http.HTTPFlow) and f.request and f.request.raw_content is not None
+            isinstance(f, http.HTTPFlow) and f.request and f.request.raw_content is not None
     )
     response_present = (
-        isinstance(f, http.HTTPFlow)
-        and f.response
-        and f.response.raw_content is not None
+            isinstance(f, http.HTTPFlow)
+            and f.response
+            and f.response.raw_content is not None
     )
 
     if request_present and response_present:
@@ -144,12 +144,39 @@ def raw(f: flow.Flow, separator=b"\r\n\r\n") -> bytes:
         raise exceptions.CommandError("Can't export flow with no request or response.")
 
 
+def python_script(f: flow.Flow) -> str:
+    request = cleanup_request(f)
+    data = [
+        "import http.client",
+        "", "",
+        "def %s_%s() -> http.client.HTTPResponse:" % (request.method, "_".join(request.path_components)),
+        "    method, path = '%s', '%s'" % (request.method, request.path),
+        "    host, port = '%s', %s" % (request.host, request.port),
+    ]
+    headers = ["    headers = {", ]
+    for header in request.headers.fields:
+        headers.append(f"        '{header[0].decode('utf-8')}': '{header[1].decode('utf-8')}',")
+    headers.append("    }")
+    data += headers
+
+    body = "    body = '%s'" % request.content.decode('utf-8')
+    data.append(body)
+    data.append(
+        "    connection = http.client.%sConnection(host, port)" % request.scheme.upper()
+    )
+    data.append("    connection.request(method, path, body, headers)")
+    data.append("    return connection.getresponse()")
+
+    return "\n".join(data)
+
+
 formats: dict[str, Callable[[flow.Flow], str | bytes]] = dict(
     curl=curl_command,
     httpie=httpie_command,
     raw=raw,
     raw_request=raw_request,
     raw_response=raw_response,
+    python_script=python_script,
 )
 
 
