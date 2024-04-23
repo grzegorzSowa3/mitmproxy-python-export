@@ -1,12 +1,16 @@
+import base64
+import io
 import logging
+import re
 import shlex
 from collections.abc import Callable
 from collections.abc import Sequence
 from typing import Any
 
-import pyperclip
+from werkzeug.formparser import MultiPartParser
 
 import mitmproxy.types
+import pyperclip
 from mitmproxy import command
 from mitmproxy import ctx
 from mitmproxy import exceptions
@@ -149,25 +153,116 @@ def python_script(f: flow.Flow) -> str:
     data = [
         "import http.client",
         "", "",
-        "def %s_%s() -> http.client.HTTPResponse:" % (request.method, "_".join(request.path_components)),
+        "def %s_%s() -> http.client.HTTPResponse:" % (
+            request.method, "_".join(request.path_components).replace('-', '')
+        ),
         "    method, path = '%s', '%s'" % (request.method, request.path),
         "    host, port = '%s', %s" % (request.host, request.port),
     ]
     headers = ["    headers = {", ]
     for header in request.headers.fields:
-        headers.append(f"        '{header[0].decode('utf-8')}': '{header[1].decode('utf-8')}',")
+        if header[0].decode('utf-8').casefold() != 'content-length':
+            headers.append(f"        '{header[0].decode('utf-8')}': '{header[1].decode('utf-8')}',")
     headers.append("    }")
     data += headers
 
-    body = "    body = '%s'" % request.content.decode('utf-8')
-    data.append(body)
+    body, body_imports = python_script_body(request)
+    for imp in body_imports:
+        data.insert(0, imp)
+    for line in body:
+        data.append(f"    {line}")
+    data.append("    headers['Content-Length'] = str(len(body))")
+
     data.append(
         "    connection = http.client.%sConnection(host, port)" % request.scheme.upper()
     )
     data.append("    connection.request(method, path, body, headers)")
     data.append("    return connection.getresponse()")
+    data.append("")
 
     return "\n".join(data)
+
+
+multipart_boundary_re = re.compile(".*boundary=(.*)", re.IGNORECASE)
+
+
+# return lines and imports
+def python_script_body(
+        request: http.Request,
+) -> tuple[list[str], list[str]]:
+    content_type = request.headers['content-type']
+    content_length = int(request.headers['content-length'])
+    if content_type is not None and 'multipart' in content_type:
+        fields = ["fields = {"]
+        files = ["files = {"]
+
+        parser = MultiPartParser()
+        boundary = multipart_boundary_re.findall(content_type)[0]
+        fields_extracted, files_extracted = parser.parse(
+            stream=io.BytesIO(request.content),
+            boundary=boundary.encode("utf-8"),
+            content_length=content_length,
+        )
+        for field_name, field_value in fields_extracted.items():
+            fields.append(
+                f"    '{field_name}': '{field_value}',"
+            )
+        for field_name, file in files_extracted.items():
+            files.append(
+                f"    '{field_name}': " + '{'
+            ),
+            files.append(
+                f"        'filename': '{file.filename}',"
+            )
+            files.append(
+                f"        'content_type': '{file.content_type}',"
+            )
+            files.append(
+                f"        'content': \"\"\"{base64.encodebytes(file.stream.read()).decode('utf-8')}\"\"\","
+            )
+            files.append("    },")
+        fields.append("}")
+        files.append("}")
+        imports = [
+            "import io",
+            "import base64",
+            "from werkzeug.test import encode_multipart",
+            "from werkzeug.datastructures.file_storage import FileStorage",
+        ]
+        lines = fields + files
+        lines += [
+            "_, body = encode_multipart(",
+            f"    boundary='{boundary}',",
+            "    values={",
+            "        field_name: field_value",
+            "        for field_name, field_value in fields.items()",
+            "    } | {",
+            "        field_name: FileStorage(",
+            "            filename=file['filename'],",
+            "            content_type=file['content_type'],",
+            "            stream=io.BytesIO(base64.decodebytes(file['content'].encode('utf-8'))),",
+            "        ) for field_name, file in files.items()",
+            "    },",
+            ")",
+        ]
+        return lines, imports
+    try:
+        return (
+            ["body = '%s'" % request.content.decode('utf-8')],
+            [],
+        )
+    except UnicodeDecodeError:
+        pass
+    imports = []
+    body_bytes = [
+        "body_base64 = \"\"\"%s\"\"\"" % base64.encodebytes(request.content).decode('utf-8'),
+        "body = base64.decodebytes(body_base64.encode('utf-8'))"
+    ]
+    imports.append("import base64")
+    return (
+        body_bytes,
+        imports,
+    )
 
 
 formats: dict[str, Callable[[flow.Flow], str | bytes]] = dict(
