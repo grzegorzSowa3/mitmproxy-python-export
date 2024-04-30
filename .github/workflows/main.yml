@@ -72,9 +72,23 @@ jobs:
           # run tests with loopback only. We need to sudo for unshare, which means we need an absolute path for tox.
           sudo unshare --net -- sh -c "ip link set lo up; $(which tox) -e py"
         if: matrix.os == 'ubuntu-latest'
-      - uses: mhils/better-codecov-action@main
+      - uses: codecov/codecov-action@v4
         with:
-          arguments: '--file ./coverage.xml --name ${{ matrix.os }}'
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.xml
+
+  test-old-dependencies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .github/python-version.txt
+      - run: pip install tox-uv
+      - run: tox -e old-dependencies
 
   build:
     strategy:
@@ -164,9 +178,10 @@ jobs:
         run: npm ci
       - working-directory: ./web
         run: npm test
-      - uses: mhils/better-codecov-action@main
+      - uses: codecov/codecov-action@v4
         with:
-          arguments: '--file ./web/coverage/coverage-final.json'
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./web/coverage/coverage-final.json
 
   docs:
     runs-on: ubuntu-latest
@@ -206,8 +221,9 @@ jobs:
     - mypy
     - individual-coverage
     - test
-    - build
+    - test-old-dependencies
     - test-web-ui
+    - build
     - docs
     uses: mhils/workflows/.github/workflows/alls-green.yml@main
     with:

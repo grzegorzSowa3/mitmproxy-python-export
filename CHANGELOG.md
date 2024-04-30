@@ -7,8 +7,20 @@
 
 ## Unreleased: mitmproxy next
 
+* Release tags are now prefixed with `v` again to follow SemVer convention.
+  ([#6810](https://github.com/mitmproxy/mitmproxy/pull/6810), @mhils)
+* Fix a bug where mitmproxy would not exit when `-n` is passed.
+  ([#6819](https://github.com/mitmproxy/mitmproxy/pull/6819), @mhils)
+* Set the `unbuffered` (stdout/stderr) flag for the `mitmdump` PyInstaller build.
+  ([#6821](https://github.com/mitmproxy/mitmproxy/pull/6821), @Prinzhorn)
+
+
+## 17 April 2024: mitmproxy 10.3.0
+
 * Add support for editing non text files in a hex editor
   ([#6768](https://github.com/mitmproxy/mitmproxy/pull/6768), @wnyyyy)
+* Add `server_connect_error` hook that is triggered when connection establishment fails.
+  ([#6806](https://github.com/mitmproxy/mitmproxy/pull/6806), @haanhvu, @spacewasp, @mhils)
 * Add section in mitmweb for rendering, adding and removing a comment
   ([#6709](https://github.com/mitmproxy/mitmproxy/pull/6709), @lups2000)
 * Fix multipart form content view being unusable.
@@ -35,6 +47,8 @@
   ([#6767](https://github.com/mitmproxy/mitmproxy/pull/6767), @txrp0x9)
 * Fix compatibility with older cryptography versions and silence a DeprecationWarning on Python <3.11.
   ([#6790](https://github.com/mitmproxy/mitmproxy/pull/6790), @mhils)
+* Fix a bug when proxying unicode domains.
+  ([#6796](https://github.com/mitmproxy/mitmproxy/pull/6796), @mhils)
 
 
 ## 07 March 2024: mitmproxy 10.2.4
@@ -138,6 +152,9 @@
   ([#6492](https://github.com/mitmproxy/mitmproxy/pull/6492), @xBZZZZ)
 * Enhance documentation and add alert log messages when stream_large_bodies and modify_body are set
   ([#6514](https://github.com/mitmproxy/mitmproxy/pull/6514), @rosydawn6)
+
+### Breaking Changes
+
 * Subject Alternative Names are now represented as `cryptography.x509.GeneralNames` instead of `list[str]`
   across the codebase. This fixes a regression introduced in mitmproxy 10.1.1 related to punycode domain encoding.
   ([#6537](https://github.com/mitmproxy/mitmproxy/pull/6537), @mhils)
