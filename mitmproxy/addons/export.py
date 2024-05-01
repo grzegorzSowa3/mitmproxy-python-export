@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from werkzeug.formparser import MultiPartParser
+from werkzeug.formparser import FormDataParser
 
 import mitmproxy.types
 import pyperclip
@@ -246,6 +247,26 @@ def python_script_body(
             ")",
         ]
         return lines, imports
+
+    if content_type is not None and 'x-www-form-urlencoded' in content_type:
+        lines = ["fields = {"]
+        parser = FormDataParser()
+        _, fields_extracted, _ = parser.parse(
+            stream=io.BytesIO(request.content),
+            mimetype="application/x-www-form-urlencoded",
+            content_length=content_length,
+        )
+        for field_name, field_value in fields_extracted.items():
+            lines.append(
+                f"    '{field_name}': '{field_value}',"
+            )
+        lines.append("}")
+        imports = [
+            "import urllib.parse"
+        ]
+        lines.append("body = urllib.parse.urlencode(fields)")
+        return lines, imports
+
     try:
         return (
             ["body = '%s'" % request.content.decode('utf-8')],
