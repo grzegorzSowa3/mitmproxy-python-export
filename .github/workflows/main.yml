@@ -254,7 +254,7 @@ jobs:
           name: binaries.linux
           path: release/dist
       - uses: docker/setup-qemu-action@68827325e0b33c7199eb31dd4e31fbe9023e06e3 # v3.0.0
-      - uses: docker/setup-buildx-action@2b51285047da1547ffb1b2203d8be4c0af6b1f20 # v1.6.0
+      - uses: docker/setup-buildx-action@d70bba72b1f3fd22344832f00baa16ece964efeb # v1.6.0
       - run: python release/build-and-deploy-docker.py
 
   deploy:
@@ -264,6 +264,9 @@ jobs:
     environment: ${{ (github.ref == 'refs/heads/citest' || startsWith(github.ref, 'refs/tags/')) && 'deploy-release' || 'deploy-snapshot' }}
     needs: check
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      attestations: write
     env:
       # PyPI and MSFT keys are only available for the deploy-release environment
       # The AWS access key for snapshots is scoped to branches/* as well.
@@ -302,20 +305,14 @@ jobs:
           path: docs/archive
       - uses: actions/download-artifact@v4
         with:
-          name: binaries.windows
+          pattern: binaries.*
+          merge-multiple: true
           path: release/dist
-      - uses: actions/download-artifact@v4
+      - id: provenance
+        uses: actions/attest-build-provenance@v1
         with:
-          name: binaries.linux
-          path: release/dist
-      - uses: actions/download-artifact@v4
-        with:
-          name: binaries.macos-x86_64
-          path: release/dist
-      - uses: actions/download-artifact@v4
-        with:
-          name: binaries.macos-arm64
-          path: release/dist
+          subject-path: 'release/dist/*'
+      - run: mv ${{ steps.provenance.outputs.bundle-path }} release/dist/mitmproxy-${{ github.ref_name }}.sigstore
       - run: ls docs/public
       - run: ls release/dist
 
