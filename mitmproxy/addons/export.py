@@ -1,5 +1,6 @@
 import base64
 import io
+import json
 import logging
 import re
 import shlex
@@ -7,11 +8,11 @@ from collections.abc import Callable
 from collections.abc import Sequence
 from typing import Any
 
-from werkzeug.formparser import MultiPartParser
+import pyperclip
 from werkzeug.formparser import FormDataParser
+from werkzeug.formparser import MultiPartParser
 
 import mitmproxy.types
-import pyperclip
 from mitmproxy import command
 from mitmproxy import ctx
 from mitmproxy import exceptions
@@ -151,15 +152,22 @@ def raw(f: flow.Flow, separator=b"\r\n\r\n") -> bytes:
 
 def python_script(f: flow.Flow) -> str:
     request = cleanup_request(f)
-    data = [
+    imports = [
         "import http.client",
+    ]
+    data = [
         "", "",
         "def %s_%s() -> http.client.HTTPResponse:" % (
             request.method, "_".join(request.path_components).replace('-', '')
         ),
-        "    method, path = '%s', '%s'" % (request.method, request.path),
+        "    method, path = '%s', '/%s'" % (request.method, "/".join(request.path_components)),
         "    host, port = '%s', %s" % (request.host, request.port),
     ]
+    if request.query:
+        data.append("    query_params = [")
+        for name, value in request.query.items(multi=True):
+            data.append(f"        ('{name}', '{value}'),")
+        data.append("    ]")
     headers = ["    headers = {", ]
     for header in request.headers.fields:
         if header[0].decode('utf-8').casefold() != 'content-length':
@@ -168,20 +176,28 @@ def python_script(f: flow.Flow) -> str:
     data += headers
 
     body, body_imports = python_script_body(request)
-    for imp in body_imports:
-        data.insert(0, imp)
+    imports.extend(body_imports)
     for line in body:
         data.append(f"    {line}")
     data.append("    headers['Content-Length'] = str(len(body))")
 
-    data.append(
-        "    connection = http.client.%sConnection(host, port)" % request.scheme.upper()
-    )
-    data.append("    connection.request(method, path, body, headers)")
+    if 'https' in request.scheme.casefold():
+        data.append(
+            "    connection = http.client.HTTPSConnection(host, port, context=ssl._create_unverified_context())")
+        imports.append("import ssl")
+    else:
+        data.append("    connection = http.client.HTTPConnection(host, port)")
+
+    if request.query:
+        imports.append("import urllib")
+        data.append("""    connection.request(method, f"{path}?{urllib.parse.urlencode(query_params)}", body, headers)""")
+    else:
+        data.append("    connection.request(method, path, body, headers)")
+
     data.append("    return connection.getresponse()")
     data.append("")
 
-    return "\n".join(data)
+    return "\n".join(imports + data)
 
 
 multipart_boundary_re = re.compile(".*boundary=(.*)", re.IGNORECASE)
@@ -191,7 +207,9 @@ multipart_boundary_re = re.compile(".*boundary=(.*)", re.IGNORECASE)
 def python_script_body(
         request: http.Request,
 ) -> tuple[list[str], list[str]]:
-    content_type = request.headers['content-type']
+    content_type = None
+    if 'content-type' in request.headers.keys():
+        content_type = request.headers['content-type']
     content_length = int(request.headers['content-length'])
     if content_type is not None and 'multipart' in content_type:
         fields = ["fields = {"]
@@ -249,7 +267,7 @@ def python_script_body(
         return lines, imports
 
     if content_type is not None and 'x-www-form-urlencoded' in content_type:
-        lines = ["fields = {"]
+        lines = ["fields = ["]
         parser = FormDataParser()
         _, fields_extracted, _ = parser.parse(
             stream=io.BytesIO(request.content),
@@ -258,13 +276,22 @@ def python_script_body(
         )
         for field_name, field_value in fields_extracted.items():
             lines.append(
-                f"    '{field_name}': '{field_value}',"
+                f"    ('{field_name}', '{field_value}'),"
             )
-        lines.append("}")
+        lines.append("]")
         imports = [
             "import urllib.parse"
         ]
         lines.append("body = urllib.parse.urlencode(fields)")
+        return lines, imports
+
+    if content_type is not None and 'json' in content_type:
+        lines = json_lines(json.loads(request.content.decode('utf-8')))
+        lines[0] = "fields = " + lines[0]
+        imports = [
+            "import json"
+        ]
+        lines.append("body = json.dumps(fields)")
         return lines, imports
 
     try:
@@ -294,6 +321,52 @@ formats: dict[str, Callable[[flow.Flow], str | bytes]] = dict(
     raw_response=raw_response,
     python_script=python_script,
 )
+
+
+def json_lines(obj) -> list[str]:
+    if type(obj) is list:
+        return json_list_lines(obj)
+    elif type(obj) is dict:
+        return json_dict_lines(obj)
+    elif type(obj) is str:
+        return json_string_lines(obj)
+    else:
+        return [str(obj)]
+
+
+def json_list_lines(lst: list) -> list[str]:
+    lines = ["["]
+    for item in lst:
+        for line in json_lines(item):
+            lines.append("    " + line)
+        lines[-1] = lines[-1] + ','
+    lines.append("]")
+    return lines
+
+
+def json_dict_lines(dct: dict) -> list[str]:
+    lines = ["{"]
+    for key, value in dct.items():
+        first = True
+        for line in json_lines(value):
+            if first:
+                lines.append(f""""{key}": {line}""")
+                first = False
+            else:
+                lines.append("    " + line)
+        lines[-1] = lines[-1] + ','
+    lines.append("}")
+    return lines
+
+
+def json_string_lines(string: str) -> list[str]:
+    if '\n' not in string:
+        return [f"\"{string}\""]
+    lines = ["f\"\"\""]
+    for line in string.split("\n"):
+        lines.append("    " + line.replace('{', '{{').replace('}', '}}'))
+    lines.append("\"\"\"")
+    return lines
 
 
 class Export:
