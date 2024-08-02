@@ -286,7 +286,10 @@ def python_script_body(
         return lines, imports
 
     if content_type is not None and 'json' in content_type:
-        lines = json_lines(json.loads(request.content.decode('utf-8')))
+        lines = ["{", "}"]
+        request_body = request.content.decode('utf-8')
+        if len(request_body) > 0:
+            lines = json_lines(json.loads(request_body))
         lines[0] = "fields = " + lines[0]
         imports = [
             "import json"
