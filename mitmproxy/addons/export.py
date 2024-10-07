@@ -152,55 +152,127 @@ def raw(f: flow.Flow, separator=b"\r\n\r\n") -> bytes:
 
 def python_script(f: flow.Flow) -> str:
     request = cleanup_request(f)
-    imports = [
-        "import http.client",
-    ]
-    data = [
-        "", "",
-        "def %s_%s() -> http.client.HTTPResponse:" % (
-            request.method, "_".join(request.path_components).replace('-', '')
-        ),
-        "    method, path = '%s', '/%s'" % (request.method, "/".join(request.path_components)),
-        "    host, port = '%s', %s" % (request.host, request.port),
+    imports = []
+    fun_arguments = []
+    fun_body = [
+        "method, path = '%s', '/%s'" % (request.method, "/".join(request.path_components)),
+        "host, port = '%s', %s" % (request.host, request.port),
     ]
     if request.query:
-        data.append("    query_params = [")
+        fun_body.append("query_params = [")
         for name, value in request.query.items(multi=True):
-            data.append(f"        ('{name}', '{value}'),")
-        data.append("    ]")
-    headers = ["    headers = {", ]
-    for header in request.headers.fields:
-        if header[0].decode('utf-8').casefold() != 'content-length':
-            headers.append(f"        '{header[0].decode('utf-8')}': '{header[1].decode('utf-8')}',")
-    headers.append("    }")
-    data += headers
+            fun_body.append(f"    ('{name}', '{value}'),")
+        fun_body.append("]")
+    headers = ["headers = {", ]
+    for name, value in request.headers.items(multi=True):
+        if name.casefold() != 'content-length':
+            headers.append(f"    '{name}': '{value}',")
+    headers.append("}")
 
     body, body_imports = python_script_body(request)
     imports.extend(body_imports)
-    for line in body:
-        data.append(f"    {line}")
-    data.append("    headers['Content-Length'] = str(len(body))")
 
-    if 'https' in request.scheme.casefold():
-        data.append(
-            "    connection = http.client.HTTPSConnection(host, port, context=ssl._create_unverified_context())")
-        imports.append("import ssl")
+    if is_websocket(request):
+        fun_name = "def WS_%s(" % (
+            "_".join(request.path_components).replace('-', '')
+        )
+        fun_return_type = ") -> WebSocketApp:"
+        imports += [
+            "import time",
+            "import threading",
+            "from websocket import WebSocket",
+            "from websocket import WebSocketApp",
+            "from typing import Callable",
+        ]
+        fun_arguments += [
+            'on_open: Callable[[WebSocket], None] = lambda ws: print("opened connection"),',
+            'on_message: Callable[[WebSocket, str], None] = lambda ws, msg: print(msg),',
+            'on_error: Callable[[WebSocket, Exception], None] = lambda ws, ex: print(ex),',
+            'on_close: Callable[[WebSocket, int, str], None] = lambda ws, code, msg: print(f"closed with msg: {msg}"),',
+        ]
+
+        for forbidden in ws_problematic_headers:
+            headers = [header for header in headers if f"'{forbidden}':" not in header.casefold()]
+
+        fun_body += headers
+        fun_body += [
+            'ws = WebSocketApp(',
+            '    url=f"wss://{host}{path}",',
+            '    on_open=on_open,',
+            '    on_message=on_message,',
+            '    on_error=on_error,',
+            '    on_close=on_close,',
+            '    header=headers,',
+            ')',
+            'threading.Thread(target=lambda: ws.run_forever(reconnect=1)).start()',
+            'time.sleep(0.5)',
+            'return ws',
+        ]
     else:
-        data.append("    connection = http.client.HTTPConnection(host, port)")
+        imports += [
+            "import http.client",
+        ]
+        fun_name = "def %s_%s(" % (
+            request.method, "_".join(request.path_components).replace('-', '')
+        )
+        fun_return_type = ") -> http.client.HTTPResponse:"
 
-    if request.query:
-        imports.append("import urllib")
-        data.append("""    connection.request(method, f"{path}?{urllib.parse.urlencode(query_params)}", body, headers)""")
-    else:
-        data.append("    connection.request(method, path, body, headers)")
+        fun_body += headers
+        for line in body:
+            fun_body.append(f"{line}")
+        fun_body.append("headers['Content-Length'] = str(len(body))")
 
-    data.append("    return connection.getresponse()")
-    data.append("")
+        if 'https' in request.scheme.casefold():
+            fun_body.append(
+                "connection = http.client.HTTPSConnection(host, port, context=ssl._create_unverified_context())")
+            imports.append("import ssl")
+        else:
+            fun_body.append("connection = http.client.HTTPConnection(host, port)")
+        if request.query:
+            imports.append("import urllib")
+            fun_body.append(
+                """connection.request(method, f"{path}?{urllib.parse.urlencode(query_params)}", body, headers)""")
+        else:
+            fun_body.append("connection.request(method, path, body, headers)")
 
-    return "\n".join(imports + data)
+        fun_body.append("return connection.getresponse()")
+
+    return "\n".join(
+        imports +
+        ["", "", fun_name] +
+        indent(fun_arguments, spaces=8) +
+        [fun_return_type] +
+        indent(fun_body) +
+        [""]
+    )
 
 
 multipart_boundary_re = re.compile(".*boundary=(.*)", re.IGNORECASE)
+ws_problematic_headers = [
+    'origin', 'connection', 'upgrade', 'host',  # duplicated by client library
+    'sec-websocket-extensions',  # introduces error: 'rsv is not implemented, yet'
+]
+
+
+def indent(
+        lines: list[str],
+        spaces: int = 4,
+) -> list[str]:
+    return [' ' * spaces + line for line in lines]
+
+
+def is_websocket(
+        request: http.Request,
+) -> bool:
+    if 'connection' not in request.headers:
+        return False
+    if 'upgrade' not in request.headers['connection'].casefold():
+        return False
+    if 'upgrade' not in request.headers:
+        return False
+    if 'websocket' not in request.headers['upgrade'].casefold():
+        return False
+    return True
 
 
 # return lines and imports
