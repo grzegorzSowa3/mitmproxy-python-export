@@ -76,6 +76,11 @@ class Servers:
                 if spec not in new_instances
             ]
 
+            if not start_tasks and not stop_tasks:
+                return (
+                    True  # nothing to do, so we don't need to trigger `self.changed`.
+                )
+
             self._instances = new_instances
             # Notify listeners about the new not-yet-started servers.
             await self.changed.send()
@@ -116,11 +121,13 @@ class Proxyserver(ServerManager):
     is_running: bool
     _connect_addr: Address | None = None
     _update_task: asyncio.Task | None = None
+    _inject_tasks: set[asyncio.Task]
 
     def __init__(self):
         self.connections = {}
         self.servers = Servers(self)
         self.is_running = False
+        self._inject_tasks = set()
 
     def __repr__(self):
         return f"Proxyserver({len(self.connections)} active conns)"
@@ -252,14 +259,18 @@ class Proxyserver(ServerManager):
                     )
 
             # ...and don't listen on the same address.
-            listen_addrs = [
-                (
-                    m.listen_host(ctx.options.listen_host),
-                    m.listen_port(ctx.options.listen_port),
-                    m.transport_protocol,
-                )
-                for m in modes
-            ]
+            listen_addrs = []
+            for m in modes:
+                if m.transport_protocol == "both":
+                    protocols = ["tcp", "udp"]
+                else:
+                    protocols = [m.transport_protocol]
+                host = m.listen_host(ctx.options.listen_host)
+                port = m.listen_port(ctx.options.listen_port)
+                if port is None:
+                    continue
+                for proto in protocols:
+                    listen_addrs.append((host, port, proto))
             if len(set(listen_addrs)) != len(listen_addrs):
                 (host, port, _) = collections.Counter(listen_addrs).most_common(1)[0][0]
                 dup_addr = human.format_address((host or "0.0.0.0", port))
@@ -303,7 +314,15 @@ class Proxyserver(ServerManager):
             )
         if connection_id not in self.connections:
             raise ValueError("Flow is not from a live connection.")
-        self.connections[connection_id].server_event(event)
+
+        t = asyncio_utils.create_task(
+            self.connections[connection_id].server_event(event),
+            name=f"inject_event",
+            client=event.flow.client_conn.peername,
+        )
+        # Python 3.11 Use TaskGroup instead.
+        self._inject_tasks.add(t)
+        t.add_done_callback(self._inject_tasks.remove)
 
     @command.command("inject.websocket")
     def inject_websocket(

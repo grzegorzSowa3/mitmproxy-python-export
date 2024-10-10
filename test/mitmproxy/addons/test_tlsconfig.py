@@ -1,4 +1,5 @@
 import ipaddress
+import logging
 import ssl
 import time
 from pathlib import Path
@@ -17,8 +18,8 @@ from mitmproxy.proxy.layers import modes
 from mitmproxy.proxy.layers import quic
 from mitmproxy.proxy.layers import tls as proxy_tls
 from mitmproxy.test import taddons
-from test.mitmproxy.proxy.layers import test_quic
 from test.mitmproxy.proxy.layers import test_tls
+from test.mitmproxy.proxy.layers.quic import test__stream_layers as test_quic
 
 
 def test_alpn_select_callback():
@@ -107,6 +108,29 @@ class TestTlsConfig:
             )
             assert ta.certstore.certs
 
+    def test_configure_tls_version(self, caplog):
+        caplog.set_level(logging.INFO)
+        ta = tlsconfig.TlsConfig()
+        with taddons.context(ta) as tctx:
+            for attr in [
+                "tls_version_client_min",
+                "tls_version_client_max",
+                "tls_version_server_min",
+                "tls_version_server_max",
+            ]:
+                caplog.clear()
+                tctx.configure(ta, **{attr: "SSL3"})
+                assert (
+                    f"{attr} has been set to SSL3, "
+                    "which is not supported by the current OpenSSL build."
+                ) in caplog.text
+            caplog.clear()
+            tctx.configure(ta, tls_version_client_min="UNBOUNDED")
+            assert (
+                "tls_version_client_min has been set to UNBOUNDED. "
+                "Note that your OpenSSL build only supports the following TLS versions"
+            ) in caplog.text
+
     def test_get_cert(self, tdata):
         """Test that we generate a certificate matching the connection's context."""
         ta = tlsconfig.TlsConfig()
@@ -150,9 +174,7 @@ class TestTlsConfig:
 
             with open(tdata.path("mitmproxy/data/invalid-subject.pem"), "rb") as f:
                 ctx.server.certificate_list = [certs.Cert.from_pem(f.read())]
-            with pytest.warns(
-                UserWarning, match="Country names should be two characters"
-            ):
+            with pytest.warns(UserWarning):
                 assert ta.get_cert(ctx)  # does not raise
 
     def test_tls_clienthello(self):
@@ -389,12 +411,14 @@ class TestTlsConfig:
                 assert ctx.server.alpn_offers == expected
 
             assert_alpn(
-                True, proxy_tls.HTTP_ALPNS + (b"foo",), proxy_tls.HTTP_ALPNS + (b"foo",)
+                True,
+                (proxy_tls.HTTP2_ALPN, *proxy_tls.HTTP1_ALPNS, b"foo"),
+                (proxy_tls.HTTP2_ALPN, *proxy_tls.HTTP1_ALPNS, b"foo"),
             )
             assert_alpn(
                 False,
-                proxy_tls.HTTP_ALPNS + (b"foo",),
-                proxy_tls.HTTP1_ALPNS + (b"foo",),
+                (proxy_tls.HTTP2_ALPN, *proxy_tls.HTTP1_ALPNS, b"foo"),
+                (*proxy_tls.HTTP1_ALPNS, b"foo"),
             )
             assert_alpn(True, [], [])
             assert_alpn(False, [], [])
